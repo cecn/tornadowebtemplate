@@ -87,6 +87,9 @@ class JsonHandler (BaseHandler):
             return getattr(self, '%s_json' % call)(**self.request.arguments)
         raise tornado.web.HTTPError(404)
 
+    def post (self, call):
+        return self.get(call)
+
 class WebSocketHandler (tornado.websocket.WebSocketHandler):
     def register_listener (self, prefix):
         pool = self.application.websockets.setdefault(prefix, [])
