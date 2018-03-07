@@ -41,17 +41,50 @@ class BaseHandler (tornado.web.RequestHandler):
         else:
             super(BaseHandler, self).redirect('%s' % where)
 
-class MainHandler(BaseHandler):
-    STATIC_REDIRS = ['.ico']
+def finishjson (self, val):
+    return self.finish(simplejson.dumps(val, use_decimal=True, default=json_default))
 
-    def get(self, call="index", x={}):
+def finishjsonwrapper (func):
+    def wrapped (self, *args, **kwargs):
+        return finishjson(func(self, *args, **kwargs))
+    return wrapped
+
+class UnhandledPath (Exception):
+    pass
+
+class MainHandler(BaseHandler):
+    """
+    Base class for handling root paths.
+    Class functions prefixed with get_ will be called with urls where the
+    full path matches the remainder of the function name.
+    """
+    STATIC_REDIRS = ['.ico']
+    HANDLE_SUBPATHS = True
+
+    def get(self, call, x={}):
+        h = self.request.headers
+        if self.HANDLE_SUBPATHS:
+            parsedcall = call.split('/')
+            basepath = parsedcall[:-1]
+            call = parsedcall[-1]
+        else:
+            basepath = None
+        if len(call) == 0:
+            call = "index"
         if hasattr(self, 'https_%s' % call):
-            h = self.request.headers
             if h.has_key('X-Scheme') and h['X-Scheme'] != 'https':
                 self.redirect("https://%s%s" % (h['Host'], h['X-Uri']))
                 return
-        if hasattr(self, 'http_get_' + str(call)):
-            return getattr(self, 'http_get_' + str(call))()
+        if hasattr(self, 'get_' + str(call)):
+            try:
+                return getattr(self, 'get_' + str(call))(basepath)
+            except UnhandledPath:
+                pass
+        if hasattr(self, 'json_' + str(call)):
+            try:
+                return finishjson(self, getattr(self, 'json_' + str(call))(basepath))
+            except UnhandledPath:
+                pass
         if len(filter(lambda x: call.lower().endswith(x), self.STATIC_REDIRS)):
             self.redirect('/static/' + call)
             return
@@ -70,25 +103,9 @@ class MainHandler(BaseHandler):
                 raise tornado.web.HTTPError(405)
         if hasattr(self, 'post_' + str(call)):
             return getattr(self, 'post_' + str(call))()
+        if hasattr(self, 'json_' + str(call)):
+            return finishjson(getattr(self, 'json_' + str(call))())
         raise tornado.web.HTTPError(405)
-
-def finishjson (func):
-    def wrapped (self, *args, **kwargs):
-        return self.finish(simplejson.dumps(func(self, *args, **kwargs), use_decimal=True, default=json_default))
-    return wrapped
-
-class JsonHandler (BaseHandler):
-    def get (self, call):
-        if hasattr(self, 'https_%s' % call):
-            h = self.request.headers
-            if h.has_key('X-Scheme') and h['X-Scheme'] != 'https':
-                raise tornado.web.HTTPError(404)
-        if hasattr(self, '%s_json' % call):
-            return getattr(self, '%s_json' % call)(**self.request.arguments)
-        raise tornado.web.HTTPError(404)
-
-    def post (self, call):
-        return self.get(call)
 
 class WebSocketHandler (tornado.websocket.WebSocketHandler):
     def register_listener (self, prefix):
@@ -138,26 +155,30 @@ class WebSocketHandler (tornado.websocket.WebSocketHandler):
         self.unregister_listener()
 
 class Application(tornado.web.Application):
-    MH = MainHandler
-    WSH = WebSocketHandler
-    JH = JsonHandler
+    # You can use MainHandler as a base or a self contained class for handling root path
+    MainHandler = None
+    WebSocketHandler = None
 
-    def __init__(self):
-        handlers, settings = self.__setup__()
+    def __init__(self, handlers=None, mainhandler=None, wshandler=None):
+        if mainhandler is not None:
+            self.MainHandler = mainhandler
+        if wshandler is not None:
+            self.WebSocketHandler = wshandler
+        handlers, settings = self.__setup__(handlers=handlers)
         tornado.options.options.logging = 'none'
         tornado.web.Application.__init__(self, handlers, **settings)
         self.websockets = {}
         self.running = True
 
-    def __setup__ (self, BASEPATH=None):
+    def __setup__ (self, BASEPATH=None, handlers=None):
         if BASEPATH is None:
             BASEPATH = os.getcwd()
-        handlers = [
-            (r"/", self.MH),
-            (r"/ws", self.WSH),
-            (r"/([^/]*).json", self.JH),
-            (r"/([^/]*)", self.MH),
-        ]
+        if handlers is None:
+            handlers = []
+        if self.WebSocketHandler is not None:
+            handlers.append((r"/ws", self.WebSocketHandler))
+        if self.MainHandler is not None:
+            handlers.append((r"/(.*)", self.MainHandler))
         settings = dict(
             template_path=os.path.join(BASEPATH, "templates"),
             static_path=os.path.join(BASEPATH, "static"),
@@ -173,11 +194,13 @@ class Application(tornado.web.Application):
                 for l in v:
                     l.write_message('%s %s' % (prefix, message))
 
-def main(klass, WEBPORT=8080):
+def main(klass=None, WEBPORT=8080, handlers=None, mainhandler=None, wshandler=None):
+    if klass is None:
+        klass = Application
     tornado.options.options.logging = 'none'
     tornado.options.define("port", default=WEBPORT, help="run on the given port", type=int)
     tornado.options.parse_command_line()
-    app = klass()
+    app = klass(handlers=handlers, mainhandler=mainhandler, wshandler=wshandler)
     http_server = tornado.httpserver.HTTPServer(app)
     http_server.listen(tornado.options.options.port)
     logging.getLogger('tornado.access').disabled = True
